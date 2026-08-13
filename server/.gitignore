@@ -1,0 +1,8 @@
+# SQLite database and its write-ahead log sidecars.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Compiled binaries.
+/bin/

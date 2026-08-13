@@ -1,0 +1,8 @@
+node_modules
+.DS_Store
+.env*
+.claude/
+AGENTS.md
+CLAUDE.md
+dist/
+aven.db
