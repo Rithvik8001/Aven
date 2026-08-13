@@ -14,6 +14,11 @@ import (
 // race where two concurrent signups both see the address as free.
 var ErrEmailTaken = errors.New("user: email already registered")
 
+// ErrNotFound is returned when no user matches a lookup. It is a sentinel so a
+// caller can tell "no such account" from "the query failed" — the first is an
+// ordinary outcome, the second is a fault.
+var ErrNotFound = errors.New("user: not found")
+
 // User is a registered account.
 //
 // The password hash is deliberately absent from the JSON tags: this struct is

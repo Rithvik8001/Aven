@@ -20,6 +20,19 @@ import (
 // STRICT rejects a value of the wrong type instead of silently storing it.
 // The email index is on lower(email) so Ada@example.com and ada@example.com
 // cannot both register.
+//
+// refresh_tokens stores its timestamps as Unix seconds rather than the RFC 3339
+// text used for users.created_at, because every one of them is compared against
+// "now" in a WHERE clause. RFC3339Nano is not fixed-width — a whole second
+// serialises without a fractional part — so lexical ordering does not match
+// chronological ordering, and a range query over it would be quietly wrong.
+// users.created_at is only ever read back, never compared, so text is fine
+// there.
+//
+// The hash is a BLOB: storing raw SHA-256 bytes as TEXT would fail STRICT's
+// type check, and encoding them first would only add a step to every lookup.
+// ON DELETE CASCADE means removing a user takes their sessions with them, which
+// works because the DSN turns foreign keys on.
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
     id            TEXT NOT NULL PRIMARY KEY,
@@ -30,6 +43,22 @@ CREATE TABLE IF NOT EXISTS users (
 ) STRICT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (lower(email));
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id         TEXT NOT NULL PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    family_id  TEXT NOT NULL,
+    token_hash BLOB NOT NULL,
+    issued_at  INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER,
+    revoked_at INTEGER
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS refresh_tokens_hash_unique ON refresh_tokens (token_hash);
+CREATE INDEX IF NOT EXISTS refresh_tokens_family ON refresh_tokens (family_id);
+CREATE INDEX IF NOT EXISTS refresh_tokens_user ON refresh_tokens (user_id);
+CREATE INDEX IF NOT EXISTS refresh_tokens_expires_at ON refresh_tokens (expires_at);
 `
 
 // Open connects to SQLite, applies the schema, and verifies the database is

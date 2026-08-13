@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -70,6 +71,45 @@ func (s *Store) Create(ctx context.Context, in SignupInput) (User, error) {
 	}
 
 	return newUser, nil
+}
+
+// selectColumns is shared by the lookups so a new column cannot be added to one
+// query and forgotten in the other.
+const selectColumns = `id, email, display_name, password_hash, created_at`
+
+// ByEmail finds a user by address, case-insensitively.
+//
+// The predicate is written as lower(email) to match the expression the unique
+// index is built on; a plain equality test would not use that index. The caller
+// passes the address as typed and the comparison handles the folding.
+//
+// Unlike the User returned to a client, this one carries PasswordHash — it is
+// the whole reason the lookup exists. It must not be handed to httpx.Encode
+// without being reduced first, which the json:"-" tag on that field guarantees.
+func (s *Store) ByEmail(ctx context.Context, email string) (User, error) {
+	return s.queryOne(ctx,
+		`SELECT `+selectColumns+` FROM users WHERE lower(email) = lower(?)`, email)
+}
+
+// ByID finds a user by primary key.
+func (s *Store) ByID(ctx context.Context, id string) (User, error) {
+	return s.queryOne(ctx, `SELECT `+selectColumns+` FROM users WHERE id = ?`, id)
+}
+
+func (s *Store) queryOne(ctx context.Context, query string, args ...any) (User, error) {
+	var found User
+
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+		&found.ID, &found.Email, &found.DisplayName, &found.PasswordHash, &found.CreatedAt)
+
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return User{}, ErrNotFound
+	case err != nil:
+		return User{}, fmt.Errorf("user: query: %w", err)
+	}
+
+	return found, nil
 }
 
 // isUniqueViolation reports whether err is a SQLite UNIQUE constraint failure.

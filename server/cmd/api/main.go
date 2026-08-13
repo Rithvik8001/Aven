@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rithvik/aven/server/internal/auth"
 	"github.com/rithvik/aven/server/internal/database"
 	"github.com/rithvik/aven/server/internal/httpx"
 	"github.com/rithvik/aven/server/internal/user"
@@ -36,6 +37,22 @@ func run() error {
 	addr := env("SERVER_ADDR", ":8080")
 	dbPath := env("DATABASE_PATH", "./data/aven.db")
 
+	// The signing secret has no default. A fallback here would be a fallback
+	// in production too, and a well-known signing key means anyone can mint
+	// a token for any account.
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return errors.New("JWT_SECRET must be set")
+	}
+
+	// Secure cookies are the default and must be turned off explicitly. The
+	// mistake this ordering prevents is shipping with the flag unset and
+	// silently sending the refresh token over plaintext.
+	secureCookies := env("COOKIE_SECURE", "true") != "false"
+	if !secureCookies {
+		logger.Warn("cookie Secure flag is disabled; use only for local http development")
+	}
+
 	// signal.NotifyContext turns SIGINT and SIGTERM into a cancelled context,
 	// so shutdown uses the same mechanism as every other deadline.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -47,9 +64,28 @@ func run() error {
 	}
 	defer db.Close()
 
+	users := user.NewStore(db)
+	tokens := auth.NewStore(db)
+
+	authService, err := auth.NewService(users, tokens, auth.Config{
+		Secret:          []byte(secret),
+		Issuer:          env("JWT_ISSUER", "aven"),
+		AccessTokenTTL:  auth.DefaultAccessTokenTTL,
+		RefreshTokenTTL: auth.DefaultRefreshTokenTTL,
+	})
+	if err != nil {
+		return err
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
-	user.NewHandler(user.NewStore(db), logger).Register(mux)
+	user.NewHandler(users, logger).Register(mux)
+	auth.NewHandler(authService, logger, secureCookies).Register(mux)
+
+	// Expired tokens authenticate nothing, but they accumulate: one row per
+	// refresh, per user, forever. Sweeping them keeps the table and its
+	// indexes proportional to live sessions rather than to total history.
+	go sweepExpiredTokens(ctx, tokens, logger)
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -94,6 +130,48 @@ func run() error {
 		defer cancel()
 
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+// tokenSweepInterval is how often expired refresh tokens are deleted. The rows
+// are already unusable by then, so this is housekeeping and nothing is gained
+// by running it more often.
+const tokenSweepInterval = time.Hour
+
+// sweepExpiredTokens deletes expired refresh tokens until ctx is cancelled.
+//
+// A failure here is logged and retried on the next tick rather than returned: a
+// full disk or a locked database should not take the API down when the only
+// consequence of skipping a sweep is a slightly larger table.
+func sweepExpiredTokens(ctx context.Context, tokens *auth.Store, logger *slog.Logger) {
+	ticker := time.NewTicker(tokenSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			// A bounded context of its own: ctx lives for the
+			// process, so a wedged delete would otherwise hang here
+			// until shutdown.
+			sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			removed, err := tokens.DeleteExpired(sweepCtx, time.Now().UTC())
+			cancel()
+
+			if err != nil {
+				logger.ErrorContext(ctx, "failed to sweep expired refresh tokens",
+					slog.String("error", err.Error()))
+
+				continue
+			}
+
+			if removed > 0 {
+				logger.InfoContext(ctx, "swept expired refresh tokens",
+					slog.Int64("removed", removed))
+			}
+		}
 	}
 }
 
@@ -165,7 +243,6 @@ func withLogging(next http.Handler, logger *slog.Logger) http.Handler {
 // chain, so nothing is lost by keeping this small.
 type statusRecorder struct {
 	http.ResponseWriter
-
 	status int
 }
 
