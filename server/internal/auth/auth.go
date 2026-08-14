@@ -60,6 +60,20 @@ type Config struct {
 	// Secret signs access tokens. It must be at least MinSecretBytes long.
 	Secret []byte
 
+	// KeyID names Secret in a token's "kid" header. It defaults to a fixed
+	// value when empty, so a deployment with no previous key needs no
+	// configuration here at all.
+	KeyID string
+
+	// PreviousSecret, if set, is still accepted for verifying tokens signed
+	// before a rotation, but is never used to sign new ones. Leave it empty
+	// outside of a rotation window.
+	PreviousSecret []byte
+
+	// PreviousKeyID names PreviousSecret. Required, and must differ from
+	// KeyID, whenever PreviousSecret is set.
+	PreviousKeyID string
+
 	// Issuer is the "iss" claim, and is verified on the way back in. It
 	// stops a token minted by a sibling service that happens to share the
 	// key from being accepted here.

@@ -46,6 +46,17 @@ func run() error {
 	if secret == "" {
 		return errors.New("JWT_SECRET must be set")
 	}
+	keyID := env("JWT_KEY_ID", "1")
+
+	// The previous secret is how a signing key gets rotated without logging
+	// everyone out: set both of these to the outgoing key when JWT_SECRET
+	// changes, and drop them again once every access token minted under the
+	// old key has expired.
+	previousSecret := os.Getenv("JWT_SECRET_PREVIOUS")
+	previousKeyID := os.Getenv("JWT_KEY_ID_PREVIOUS")
+	if previousSecret != "" && previousKeyID == "" {
+		return errors.New("JWT_KEY_ID_PREVIOUS must be set when JWT_SECRET_PREVIOUS is set")
+	}
 
 	// Secure cookies are the default and must be turned off explicitly. The
 	// mistake this ordering prevents is shipping with the flag unset and
@@ -81,6 +92,9 @@ func run() error {
 
 	authService, err := auth.NewService(users, tokens, auth.Config{
 		Secret:          []byte(secret),
+		KeyID:           keyID,
+		PreviousSecret:  []byte(previousSecret),
+		PreviousKeyID:   previousKeyID,
 		Issuer:          env("JWT_ISSUER", "aven"),
 		AccessTokenTTL:  auth.DefaultAccessTokenTTL,
 		RefreshTokenTTL: auth.DefaultRefreshTokenTTL,

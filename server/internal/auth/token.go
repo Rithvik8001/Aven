@@ -52,11 +52,31 @@ type Claims struct {
 	TokenUse string `json:"token_use"`
 }
 
-// Issuer mints and verifies access tokens.
-type Issuer struct {
+// defaultKeyID is the "kid" a token carries when the caller never configured
+// one. It keeps the common single-key deployment free of any new
+// configuration: nothing has to name a key until a second one exists to be
+// confused with it.
+const defaultKeyID = "1"
+
+// signingKey pairs a secret with the "kid" a token carries so Verify can find
+// it again without trying every key on hand.
+type signingKey struct {
+	id     string
 	secret []byte
-	issuer string
-	ttl    time.Duration
+}
+
+// Issuer mints and verifies access tokens.
+//
+// It holds at most two keys: current signs new tokens and verifies them;
+// previous, if set, only verifies. That is what makes rotation possible
+// without a service-wide outage — tokens signed just before a rotation stay
+// valid for the rest of their short lifetime instead of being rejected the
+// moment the key changes.
+type Issuer struct {
+	current  signingKey
+	previous *signingKey
+	issuer   string
+	ttl      time.Duration
 }
 
 // NewIssuer validates the configuration and builds an Issuer.
@@ -74,12 +94,47 @@ func NewIssuer(cfg Config) (*Issuer, error) {
 		cfg.AccessTokenTTL = DefaultAccessTokenTTL
 	}
 
-	// Copy the secret: the caller may hold the only reference to a slice it
-	// later zeroes or reuses.
-	secret := make([]byte, len(cfg.Secret))
-	copy(secret, cfg.Secret)
+	keyID := cfg.KeyID
+	if keyID == "" {
+		keyID = defaultKeyID
+	}
 
-	return &Issuer{secret: secret, issuer: cfg.Issuer, ttl: cfg.AccessTokenTTL}, nil
+	issuer := &Issuer{
+		current: signingKey{id: keyID, secret: copyBytes(cfg.Secret)},
+		issuer:  cfg.Issuer,
+		ttl:     cfg.AccessTokenTTL,
+	}
+
+	if len(cfg.PreviousSecret) > 0 {
+		if len(cfg.PreviousSecret) < MinSecretBytes {
+			return nil, fmt.Errorf("auth: previous signing secret must be at least %d bytes, got %d",
+				MinSecretBytes, len(cfg.PreviousSecret))
+		}
+
+		if cfg.PreviousKeyID == "" {
+			return nil, errors.New("auth: previous key id must not be empty when a previous secret is set")
+		}
+
+		// A collision here would mean the previous key silently wins or
+		// loses depending on map iteration — better to refuse to start
+		// than to guess which key an operator meant.
+		if cfg.PreviousKeyID == keyID {
+			return nil, errors.New("auth: previous key id must differ from the current key id")
+		}
+
+		issuer.previous = &signingKey{id: cfg.PreviousKeyID, secret: copyBytes(cfg.PreviousSecret)}
+	}
+
+	return issuer, nil
+}
+
+// copyBytes returns a copy of b: the caller may hold the only reference to a
+// slice it later zeroes or reuses.
+func copyBytes(b []byte) []byte {
+	out := make([]byte, len(b))
+	copy(out, b)
+
+	return out
 }
 
 // Issue signs an access token for userID and reports its lifetime.
@@ -100,7 +155,12 @@ func (i *Issuer) Issue(userID string, now time.Time) (string, time.Duration, err
 		TokenUse: accessTokenUse,
 	}
 
-	signed, err := jwt.NewWithClaims(signingMethod, claims).SignedString(i.secret)
+	token := jwt.NewWithClaims(signingMethod, claims)
+	// kid names which key signed the token, so Verify can find it again
+	// after a rotation swaps in a new current key.
+	token.Header["kid"] = i.current.id
+
+	signed, err := token.SignedString(i.current.secret)
 	if err != nil {
 		return "", 0, fmt.Errorf("auth: sign access token: %w", err)
 	}
@@ -115,7 +175,21 @@ func (i *Issuer) Issue(userID string, now time.Time) (string, time.Duration, err
 // fix next.
 func (i *Issuer) Verify(token string) (string, error) {
 	parsed, err := jwt.ParseWithClaims(token, &Claims{},
-		func(*jwt.Token) (any, error) { return i.secret, nil },
+		func(t *jwt.Token) (any, error) {
+			kid, _ := t.Header["kid"].(string)
+
+			switch {
+			case kid == i.current.id:
+				return i.current.secret, nil
+			case i.previous != nil && kid == i.previous.id:
+				return i.previous.secret, nil
+			default:
+				// An unrecognized kid fails closed rather than falling
+				// back to "try every key": that fallback is exactly the
+				// ambiguity a kid exists to remove.
+				return nil, ErrInvalidAccessToken
+			}
+		},
 		// WithValidMethods is the algorithm pin. Without it the keyfunc
 		// above would happily hand the HMAC secret to a token that asked
 		// to be verified some other way.
