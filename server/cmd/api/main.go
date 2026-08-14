@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -54,6 +55,15 @@ func run() error {
 		logger.Warn("cookie Secure flag is disabled; use only for local http development")
 	}
 
+	loginLimiter, err := newAuthLimiter("LOGIN", 10, time.Minute)
+	if err != nil {
+		return err
+	}
+	refreshLimiter, err := newAuthLimiter("REFRESH", 30, time.Minute)
+	if err != nil {
+		return err
+	}
+
 	// signal.NotifyContext turns SIGINT and SIGTERM into a cancelled context,
 	// so shutdown uses the same mechanism as every other deadline.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -82,7 +92,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
 	user.NewHandler(users, logger).Register(mux)
-	auth.NewHandler(authService, logger, secureCookies).Register(mux)
+	auth.NewHandler(authService, logger, secureCookies, loginLimiter, refreshLimiter).Register(mux)
 	post.NewHandler(posts, authService.Issuer(), logger).Register(mux)
 
 	// Expired tokens authenticate nothing, but they accumulate: one row per
@@ -274,4 +284,26 @@ func env(key, fallback string) string {
 	}
 
 	return fallback
+}
+
+func newAuthLimiter(prefix string, defaultCapacity int, defaultRefill time.Duration) (*auth.Limiter, error) {
+	capacity := defaultCapacity
+	if value := os.Getenv(prefix + "_RATE_LIMIT"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, errors.New(prefix + "_RATE_LIMIT must be an integer")
+		}
+		capacity = parsed
+	}
+
+	refill := defaultRefill
+	if value := os.Getenv(prefix + "_RATE_WINDOW"); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return nil, errors.New(prefix + "_RATE_WINDOW must be a duration")
+		}
+		refill = parsed
+	}
+
+	return auth.NewLimiter(auth.LimiterConfig{Capacity: capacity, RefillRate: refill})
 }

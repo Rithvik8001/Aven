@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,8 +83,10 @@ type tokenResponse struct {
 
 // Handler serves the authentication endpoints.
 type Handler struct {
-	service *Service
-	logger  *slog.Logger
+	service        *Service
+	logger         *slog.Logger
+	loginLimiter   *Limiter
+	refreshLimiter *Limiter
 
 	// secureCookies sets the Secure flag. It is configuration rather than a
 	// constant only so that a developer on http://localhost can still hold a
@@ -92,8 +95,14 @@ type Handler struct {
 }
 
 // NewHandler builds a Handler.
-func NewHandler(service *Service, logger *slog.Logger, secureCookies bool) *Handler {
-	return &Handler{service: service, logger: logger, secureCookies: secureCookies}
+func NewHandler(service *Service, logger *slog.Logger, secureCookies bool, loginLimiter, refreshLimiter *Limiter) *Handler {
+	return &Handler{
+		service:        service,
+		logger:         logger,
+		secureCookies:  secureCookies,
+		loginLimiter:   loginLimiter,
+		refreshLimiter: refreshLimiter,
+	}
 }
 
 // Register mounts the auth routes on mux.
@@ -116,6 +125,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 //	422  a field was missing
 //	500  an unexpected failure
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
+	if !h.allow(w, r, h.loginLimiter, "login") {
+		return
+	}
+
 	var in LoginInput
 
 	if err := httpx.Decode(w, r, &in); err != nil {
@@ -173,6 +186,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 //	401  the cookie was missing, expired, revoked, or already spent
 //	500  an unexpected failure
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
+	if !h.allow(w, r, h.refreshLimiter, "refresh") {
+		return
+	}
+
 	cookie, err := r.Cookie(refreshCookieName)
 	if err != nil || cookie.Value == "" {
 		httpx.Error(w, http.StatusUnauthorized, "invalid_refresh_token",
@@ -194,6 +211,21 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		TokenType:   "Bearer",
 		ExpiresIn:   int(pair.AccessExpiresIn.Seconds()),
 	})
+}
+
+func (h *Handler) allow(w http.ResponseWriter, r *http.Request, limiter *Limiter, operation string) bool {
+	allowed, retryAfter := limiter.Allow(ClientIP(r), time.Now())
+	if allowed {
+		return true
+	}
+
+	h.logger.WarnContext(r.Context(), "authentication rate limit exceeded",
+		slog.String("operation", operation),
+		slog.String("client_ip", ClientIP(r)),
+	)
+	w.Header().Set("Retry-After", strconv.Itoa(int((retryAfter+time.Second-1)/time.Second)))
+	httpx.Error(w, http.StatusTooManyRequests, "rate_limited", "Too many requests. Please try again later.")
+	return false
 }
 
 func (h *Handler) handleRefreshError(w http.ResponseWriter, r *http.Request, err error) {
