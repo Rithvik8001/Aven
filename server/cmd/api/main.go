@@ -19,6 +19,7 @@ import (
 	"github.com/rithvik/aven/server/internal/auth"
 	"github.com/rithvik/aven/server/internal/database"
 	"github.com/rithvik/aven/server/internal/httpx"
+	"github.com/rithvik/aven/server/internal/post"
 	"github.com/rithvik/aven/server/internal/user"
 )
 
@@ -66,6 +67,7 @@ func run() error {
 
 	users := user.NewStore(db)
 	tokens := auth.NewStore(db)
+	posts := post.NewStore(db)
 
 	authService, err := auth.NewService(users, tokens, auth.Config{
 		Secret:          []byte(secret),
@@ -81,6 +83,7 @@ func run() error {
 	mux.HandleFunc("GET /healthz", health)
 	user.NewHandler(users, logger).Register(mux)
 	auth.NewHandler(authService, logger, secureCookies).Register(mux)
+	post.NewHandler(posts, authService.Issuer(), logger).Register(mux)
 
 	// Expired tokens authenticate nothing, but they accumulate: one row per
 	// refresh, per user, forever. Sweeping them keeps the table and its

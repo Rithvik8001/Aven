@@ -59,6 +59,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS refresh_tokens_hash_unique ON refresh_tokens (
 CREATE INDEX IF NOT EXISTS refresh_tokens_family ON refresh_tokens (family_id);
 CREATE INDEX IF NOT EXISTS refresh_tokens_user ON refresh_tokens (user_id);
 CREATE INDEX IF NOT EXISTS refresh_tokens_expires_at ON refresh_tokens (expires_at);
+
+CREATE TABLE IF NOT EXISTS posts (
+    id           TEXT NOT NULL PRIMARY KEY,
+    author_id    TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    title        TEXT NOT NULL,
+    slug         TEXT NOT NULL,
+    excerpt      TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('draft', 'published')),
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    published_at TEXT
+) STRICT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS posts_slug_unique ON posts (slug);
+CREATE INDEX IF NOT EXISTS posts_author_updated_at ON posts (author_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS posts_published_at ON posts (published_at DESC, id DESC);
 `
 
 // Open connects to SQLite, applies the schema, and verifies the database is
